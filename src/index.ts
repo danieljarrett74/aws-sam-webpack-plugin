@@ -3,104 +3,81 @@ import * as path from "path";
 import { schema } from "yaml-cfn";
 import yaml from "js-yaml";
 
-interface AwsSamProjectMap {
-  [pname: string]: string;
-}
 
-interface AwsSamPluginOptions {
-  projects: AwsSamProjectMap;
-  outFile: string;
-  vscodeDebug: boolean;
-}
+
 
 interface IEntryPointMap {
   [pname: string]: string;
 }
 
-interface SamConfig {
-  buildRoot: string;
-  entryPointName: string;
-  outFile: string;
-  projectKey: string;
-  samConfig: any;
+interface EntryPoint {
+  resourceKey: string;
+  inputPath: string;
+  outputPath: string;
+}
+
+// get rid of ientry and move nested templates into sam template as their own type
+interface Stack {
+  entryPoints: EntryPoint[];
+  templatePath: string;
+  templateYml: any;
   templateName: string;
 }
 
-interface IEntryForResult {
-  entryPoints: IEntryPointMap;
-  launchConfigs: any[];
-  samConfigs: SamConfig[];
+interface Cloudformation {
+  stack: Stack;
+  nestedStacks: Stack[];
 }
 
 class AwsSamPlugin {
-  private static defaultTemplates = ["template.yaml", "template.yml"];
-  private launchConfig: any;
-  private options: AwsSamPluginOptions;
-  private samConfigs: SamConfig[];
-
-  constructor(options?: Partial<AwsSamPluginOptions>) {
-    this.options = {
-      projects: { default: "." },
-      outFile: "app",
-      vscodeDebug: true,
-      ...options,
-    };
-    this.samConfigs = [];
+  private cloudformation: Cloudformation | undefined;
+  private inputPath:string = ".";
+  private outputPath: string = "./.aws-sam/build";
+  private entryPoints: EntryPoint[] = [];
+  //private absoluteInputPath:string = "";
+  //private absoluteOutputPath:string = "";
+  private templatPath: string = "template.yml";
+  constructor() {
+    //this.absoluteInputPath = path.resolve(this.inputPath);
+    //this.absoluteOutputPath = path.resolve(this.outputPath);
+    this.cloudformation = undefined;
+    this.entryPoints = [];
   }
 
-  // Returns the name of the SAM template file or null if it's not found
-  private findTemplateName(prefix: string) {
-    for (const f of AwsSamPlugin.defaultTemplates) {
-      const template = `${prefix}/${f}`;
-      if (fs.existsSync(template)) {
-        return template;
-      }
-    }
 
-    return null;
-  }
 
-  // Returns a webpack entry object based on the SAM template
-  public entryFor(
-    projectKey: string,
-    projectPath: string,
-    projectTemplateName: string,
-    projectTemplate: string,
-    outFile: string
-  ): IEntryForResult {
-    const entryPoints: IEntryPointMap = {};
-    const launchConfigs: any[] = [];
-    const samConfigs: SamConfig[] = [];
+  private getStack(templatePath: string): Stack {
 
-    const samConfig = yaml.load(projectTemplate, { filename: projectTemplateName, schema }) as any;
+    const templateYml = yaml.load(fs.readFileSync(templatePath).toString(), { filename: path.basename(templatePath), schema }) as any;
 
-    const defaultRuntime = samConfig.Globals?.Function?.Runtime ?? null;
-    const defaultHandler = samConfig.Globals?.Function?.Handler ?? null;
-    const defaultCodeUri = samConfig.Globals?.Function?.CodeUri ?? null;
+    const defaultRuntime = templateYml.Globals?.Function?.Runtime ?? null;
+    const defaultHandler = templateYml.Globals?.Function?.Handler ?? null;
+    const defaultCodeUri = templateYml.Globals?.Function?.CodeUri ?? null;
+    let entryPoints: EntryPoint[] = [];
+
 
     // Loop through all of the resources
-    for (const resourceKey in samConfig.Resources) {
-      const resource = samConfig.Resources[resourceKey];
+    for (const resourceKey in templateYml.Resources) {
+      const resource = templateYml.Resources[resourceKey];
 
-      const buildRoot = projectPath === "" ? `.aws-sam/build` : `${projectPath}/.aws-sam/build`;
 
       // Correct paths for files that can be uploaded using "aws couldformation package"
       if (resource.Type === "AWS::ApiGateway::RestApi" && typeof resource.Properties.BodyS3Location === "string") {
-        samConfig.Resources[resourceKey].Properties.BodyS3Location = path.relative(
-          buildRoot,
+        templateYml.Resources[resourceKey].Properties.BodyS3Location = path.relative(
+          this.inputPath,
           resource.Properties.BodyS3Location
         );
       }
       if (resource.Type === "AWS::Lambda::Function" && typeof resource.Properties.Code === "string") {
-        samConfig.Resources[resourceKey].Properties.Code = path.relative(buildRoot, resource.Properties.Code);
+        templateYml.Resources[resourceKey].Properties.Code = path.relative(this.inputPath, resource.Properties.Code);
       }
       if (
         resource.Type === "AWS::AppSync::GraphQLSchema" &&
         typeof resource.Properties.DefinitionS3Location === "string" &&
         resource.Properties.DefinitionS3Location.startsWith("s3://") === false
       ) {
-        samConfig.Resources[resourceKey].Properties.DefinitionS3Location = path.relative(
-          buildRoot,
+        templateYml.Resources[resourceKey].Properties.DefinitionS3Location = path.relative(
+          this.inputPath,
           resource.Properties.DefinitionS3Location
         );
       }
@@ -109,8 +86,8 @@ class AwsSamPlugin {
         typeof resource.Properties.RequestMappingTemplateS3Location === "string" &&
         resource.Properties.RequestMappingTemplateS3Location.startsWith("s3://") === false
       ) {
-        samConfig.Resources[resourceKey].Properties.RequestMappingTemplateS3Location = path.relative(
-          buildRoot,
+        templateYml.Resources[resourceKey].Properties.RequestMappingTemplateS3Location = path.relative(
+          this.inputPath,
           resource.Properties.RequestMappingTemplateS3Location
         );
       }
@@ -119,8 +96,8 @@ class AwsSamPlugin {
         typeof resource.Properties.ResponseMappingTemplateS3Location === "string" &&
         resource.Properties.ResponseMappingTemplateS3Location.startsWith("s3://") === false
       ) {
-        samConfig.Resources[resourceKey].Properties.ResponseMappingTemplateS3Location = path.relative(
-          buildRoot,
+        templateYml.Resources[resourceKey].Properties.ResponseMappingTemplateS3Location = path.relative(
+          this.inputPath,
           resource.Properties.ResponseMappingTemplateS3Location
         );
       }
@@ -129,8 +106,8 @@ class AwsSamPlugin {
         typeof resource.Properties.DefinitionUri === "string" &&
         resource.Properties.DefinitionUri.startsWith("s3://") === false
       ) {
-        samConfig.Resources[resourceKey].Properties.DefinitionUri = path.relative(
-          buildRoot,
+        templateYml.Resources[resourceKey].Properties.DefinitionUri = path.relative(
+          this.inputPath,
           resource.Properties.DefinitionUri
         );
       }
@@ -139,15 +116,15 @@ class AwsSamPlugin {
         typeof resource.Properties.Location === "string" &&
         resource.Properties.Location.startsWith("s3://") === false
       ) {
-        samConfig.Resources[resourceKey].Properties.Location = path.relative(buildRoot, resource.Properties.Location);
+        templateYml.Resources[resourceKey].Properties.Location = path.relative(this.inputPath, resource.Properties.Location);
       }
       if (
         resource.Type === "AWS::ElasticBeanstalk::ApplicationVersion" &&
         typeof resource.Properties.SourceBundle === "string" &&
         resource.Properties.SourceBundle.startsWith("s3://") === false
       ) {
-        samConfig.Resources[resourceKey].Properties.SourceBundle = path.relative(
-          buildRoot,
+        templateYml.Resources[resourceKey].Properties.SourceBundle = path.relative(
+          this.inputPath,
           resource.Properties.SourceBundle
         );
       }
@@ -156,10 +133,12 @@ class AwsSamPlugin {
         typeof resource.Properties.TemplateURL === "string" &&
         resource.Properties.TemplateURL.startsWith("s3://") === false
       ) {
-        samConfig.Resources[resourceKey].Properties.TemplateURL = path.relative(
-          buildRoot,
+
+        templateYml.Resources[resourceKey].Properties.TemplateURL = path.relative(
+          this.inputPath,
           resource.Properties.TemplateURL
         );
+        //console.log(samConfig.Resources[resourceKey].Properties.TemplateURL);
       }
       if (
         resource.Type === "AWS::Glue::Job" &&
@@ -167,8 +146,8 @@ class AwsSamPlugin {
         typeof resource.Properties.Command.ScriptLocation === "string" &&
         resource.Properties.Command.ScriptLocation.startsWith("s3://") === false
       ) {
-        samConfig.Resources[resourceKey].Properties.Command.ScriptLocation = path.relative(
-          buildRoot,
+        templateYml.Resources[resourceKey].Properties.Command.ScriptLocation = path.relative(
+          this.inputPath,
           resource.Properties.Command.ScriptLocation
         );
       }
@@ -177,8 +156,8 @@ class AwsSamPlugin {
         typeof resource.Properties.DefinitionS3Location === "string" &&
         resource.Properties.DefinitionS3Location.startsWith("s3://") === false
       ) {
-        samConfig.Resources[resourceKey].Properties.DefinitionS3Location = path.relative(
-          buildRoot,
+        templateYml.Resources[resourceKey].Properties.DefinitionS3Location = path.relative(
+          this.inputPath,
           resource.Properties.DefinitionS3Location
         );
       }
@@ -217,122 +196,102 @@ class AwsSamPlugin {
         if (!codeUri) {
           throw new Error(`${resourceKey} is missing a CodeUri`);
         }
-
-        const basePathPrefix = projectPath === "" ? "." : `./${projectPath}`;
-        const basePath = `${basePathPrefix}/${codeUri}`;
-        const fileBase = `${basePath}/${handlerComponents[0]}`;
-
-        // Generate the launch config for the VS Code debugger
-        launchConfigs.push({
-          name: projectKey === "default" ? resourceKey : `${projectKey}:${resourceKey}`,
-          type: "node",
-          request: "attach",
-          address: "localhost",
-          port: 5858,
-          localRoot: `\${workspaceFolder}/${buildRoot}/${resourceKey}`,
-          remoteRoot: "/var/task",
-          protocol: "inspector",
-          stopOnEntry: false,
-          outFiles: [`\${workspaceFolder}/${buildRoot}/${resourceKey}/**/*.js`],
-          sourceMaps: true,
-          skipFiles: ["/var/runtime/**/*.js", "<node_internals>/**/*.js"],
-        });
-
-        // Add the entry point for webpack
-        const entryPointName = projectKey === "default" ? resourceKey : `${projectKey}#${resourceKey}`;
-        entryPoints[entryPointName] = fileBase;
-        samConfig.Resources[resourceKey].Properties.CodeUri = resourceKey;
-        samConfig.Resources[resourceKey].Properties.Handler = `${outFile}.${handlerComponents[1]}`;
-        samConfigs.push({
-          buildRoot,
-          entryPointName,
-          outFile: `./${buildRoot}/${resourceKey}/${outFile}.js`,
-          projectKey,
-          samConfig,
-          templateName: projectTemplateName,
-        });
+        const inputPath = path.resolve(path.join(path.dirname(templatePath), codeUri, handlerComponents[0]));
+        const outputPath = path.join(this.outputPath, resourceKey, "index.js");
+        entryPoints.push({ resourceKey: resourceKey, inputPath: inputPath, outputPath: outputPath });
+        templateYml.Resources[resourceKey].Properties.CodeUri = path.relative(path.dirname(templatePath),path.join(this.inputPath,resourceKey));
+        templateYml.Resources[resourceKey].Properties.Handler = `index.${handlerComponents[1]}`;
       }
     }
-
-    return { entryPoints, launchConfigs, samConfigs };
+    //console.log("Entry Points");
+    //console.log(entryPoints);
+    return { entryPoints: entryPoints, templatePath: templatePath, templateName: path.basename(templatePath), templateYml: templateYml }
   }
 
-  public entry() {
-    // Reset the entry points and launch config
-    let allEntryPoints: IEntryPointMap = {};
-    this.launchConfig = {
-      version: "0.2.0",
-      configurations: [],
-    };
-    this.samConfigs = [];
+  public getCloudformation(): Cloudformation {
 
-    // The name of the out file
-    const outFile = this.options.outFile;
+    let nestedStacks: Stack[] = [];
+    //console.log(this.templatPath);
+    const templateYml = yaml.load(fs.readFileSync(this.templatPath).toString(), { filename: path.basename(this.templatPath), schema }) as any;
 
-    // Loop through each of the "projects" from the options
-    for (const projectKey in this.options.projects) {
-      // The value will be the name of a folder or a template file
-      const projectFolderOrTemplateName = this.options.projects[projectKey];
-
-      // If the projectFolderOrTemplateName isn't a file then we should look for common template file names
-      const projectTemplateName = fs.statSync(projectFolderOrTemplateName).isFile()
-        ? projectFolderOrTemplateName
-        : this.findTemplateName(projectFolderOrTemplateName);
-
-      // If we still cannot find a project template name then throw an error because something is wrong
-      if (projectTemplateName === null) {
-        throw new Error(
-          `Could not find ${AwsSamPlugin.defaultTemplates.join(" or ")} in ${projectFolderOrTemplateName}`
-        );
+    for (const resourceKey in templateYml.Resources) {
+      const resource = templateYml.Resources[resourceKey];
+      if (
+        resource.Type === "AWS::CloudFormation::Stack" &&
+        typeof resource.Properties.TemplateURL === "string" &&
+        resource.Properties.TemplateURL.startsWith("s3://") === false
+      ) {
+        fs.readFileSync(resource.Properties.TemplateURL);
+        nestedStacks.push(this.getStack(resource.Properties.TemplateURL));
       }
-
-      // Retrieve the entry points, VS Code debugger launch configs and SAM config for this entry
-      const { entryPoints, launchConfigs, samConfigs } = this.entryFor(
-        projectKey,
-        path.relative(".", path.dirname(projectTemplateName)),
-        path.basename(projectTemplateName),
-        fs.readFileSync(projectTemplateName).toString(),
-        outFile
-      );
-
-      // Addd them to the entry pointsm launch configs and SAM confis we've already discovered.
-      allEntryPoints = {
-        ...allEntryPoints,
-        ...entryPoints,
-      };
-      this.launchConfig.configurations = [...this.launchConfig.configurations, ...launchConfigs];
-      this.samConfigs = [...this.samConfigs, ...samConfigs];
     }
+    return { stack: this.getStack(this.templatPath), nestedStacks: nestedStacks };
+  }
 
-    // Once we're done return the entry points
-    return allEntryPoints;
+  private getEntryPointMap(cloudformation: Cloudformation): IEntryPointMap {
+    let entryPoints: IEntryPointMap = {}
+
+    cloudformation.nestedStacks.forEach((stack: Stack) => {
+      stack.entryPoints.forEach((entryPoint: EntryPoint) => {
+        this.entryPoints.push(entryPoint);
+        entryPoints[entryPoint.resourceKey] = entryPoint.inputPath;
+      });
+    });
+    cloudformation.stack.entryPoints.forEach((entryPoint: EntryPoint) => {
+      this.entryPoints.push(entryPoint);
+      entryPoints[entryPoint.resourceKey] = entryPoint.inputPath;
+    });
+    return entryPoints;
+  }
+
+  public entry(): IEntryPointMap {
+    const cloudformation: Cloudformation = this.getCloudformation();
+    this.cloudformation = cloudformation;
+    return this.getEntryPointMap(cloudformation);
   }
 
   public filename(chunkData: any) {
-    const samConfig = this.samConfigs.find((c) => c.entryPointName === chunkData.chunk.name);
-    if (!samConfig) {
-      throw new Error(`Unable to find filename for ${chunkData.chunk.name}`);
+    const entryPoint: EntryPoint | undefined = this.entryPoints.find((entryPoint: EntryPoint) => entryPoint.resourceKey === chunkData.chunk.name);
+    if (!entryPoint) {
+      throw new Error(`Unable to find entryPoint for ${chunkData.chunk.name}`);
     }
-    return samConfig.outFile;
+    //console.log(chunkData);
+    return entryPoint.outputPath;
+  }
+
+
+
+  private writeTemplateFile(stack: Stack) {
+    const templatePath = path.resolve(path.join(this.outputPath, stack.templatePath));
+    if (!fs.existsSync(path.dirname(templatePath))) {
+       fs.promises.mkdir(path.dirname(templatePath), { recursive: true }).catch((err) => {
+        throw new Error(err);
+      }).finally(() =>{
+        fs.writeFileSync(
+          templatePath,
+          yaml.dump(stack.templateYml, { indent: 2, quotingType: '"', schema })
+        );
+      });
+      
+    } else {
+      fs.writeFileSync(
+        templatePath,
+        yaml.dump(stack.templateYml, { indent: 2, quotingType: '"', schema })
+      );
+    }
   }
 
   public apply(compiler: any) {
     compiler.hooks.afterEmit.tap("SamPlugin", (_compilation: any) => {
-      if (this.samConfigs && this.launchConfig) {
-        for (const samConfig of this.samConfigs) {
-          fs.writeFileSync(
-            `${samConfig.buildRoot}/template.yaml`,
-            yaml.dump(samConfig.samConfig, { indent: 2, quotingType: '"', schema })
-          );
-        }
-        if (this.options.vscodeDebug !== false) {
-          if (!fs.existsSync(".vscode")) {
-            fs.mkdirSync(".vscode");
-          }
-          fs.writeFileSync(".vscode/launch.json", JSON.stringify(this.launchConfig, null, 2));
-        }
+      this.cloudformation?.nestedStacks.forEach((stack: Stack) => {
+        this.writeTemplateFile(stack);
+        console.log("write nested: " + path.resolve(path.join(this.outputPath, stack.templatePath)));
+      });
+      if (this.cloudformation && this.cloudformation.stack) {
+        console.log("write main: " + path.resolve(path.join(this.outputPath, this.cloudformation?.stack.templatePath)));
+        this.writeTemplateFile(this.cloudformation?.stack);
       } else {
-        throw new Error("It looks like AwsSamPlugin.entry() was not called");
+        throw new Error("No cloudformation stack object created");
       }
     });
   }
